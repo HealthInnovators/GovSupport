@@ -1,0 +1,28 @@
+project:
+  type: website
+
+website:
+  navbar:
+    title: "GovSupport"
+    background: "#f8f9fa"
+    search: true
+    tools:
+    - icon: twitter
+      href: https://twitter.com/i_dot_ai
+    - icon: github
+      href: https://github.com/i-dot-ai/GovSupport_chatbot
+  title: "GovSupport"
+  page-navigation: true
+  repo-url: https://github.com/i-dot-ai/GovSupport_chatbot
+  repo-actions: [edit, issue]
+  sidebar:
+    logo: docs/assets/GovSupport.png
+    style: "docked"
+    contents: docs
+
+format:
+  html:
+    toc: true
+
+execute:
+  freeze: "auto"

@@ -1,0 +1,33 @@
+name: Dev Deployment
+
+on:
+  push:
+    branches:
+      - develop
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+      - name: Checkout LFS objects
+        run: git lfs checkout
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-west-2
+      - name: Build and push container image
+        run: |
+          aws ecr get-login-password | docker login --username AWS --password-stdin ${{ secrets.GovSupport_ECR_ENDPOINT }}
+          docker build -f ./GovSupport_chatbot/Dockerfile -t ${{ secrets.GovSupport_ECR_REPO_ID_DEV }}:${{ github.sha }} .
+          docker tag ${{ secrets.GovSupport_ECR_REPO_ID_DEV }}:${{ github.sha }} ${{ secrets.GovSupport_ECR_ENDPOINT }}/${{ secrets.GovSupport_ECR_REPO_ID_DEV }}:${{ github.sha }}
+          docker push ${{ secrets.GovSupport_ECR_ENDPOINT }}/${{ secrets.GovSupport_ECR_REPO_ID_DEV }}:${{ github.sha }}
+      - name: Deploy infrastructure
+        run: |
+          aws cloudformation deploy --template-file infra/template.yaml --stack-name "GovSupport-dev" --capabilities CAPABILITY_NAMED_IAM --parameter-overrides StageName=dev  MessageTableName=${{ vars.MESSAGES_TABLE_NAME_DEV }}  RoutesTableName=${{ vars.ROUTES_TABLE_NAME_DEV }} PromptsTableName=${{ vars.PROMPTS_TABLE_NAME_DEV }} ResponsesTableName=${{ vars.RESPONSES_TABLE_NAME_DEV }} UserTableName=${{ vars.USERS_TABLE_NAME_DEV }} OfficesTableName=${{ vars.OFFICES_TABLE_NAME_DEV }} EvaluationTableName=${{ vars.EVALUATION_TABLE_NAME_DEV }} OpensearchUrl=${{ secrets.OPENSEARCH_DEV_URL }} OpensearchIndex=${{ secrets.OPENSEARCH_INDEX }} GovSupportServiceAccountSecretArn=${{ secrets.GovSupport_SA_ARN_DEV }} GovSupportSupervisorServiceAccountSecretArn=${{ secrets.GovSupport_SUPERVISOR_SA_ARN_DEV }} GovSupportImage=${{ secrets.GovSupport_ECR_ENDPOINT }}/${{ secrets.GovSupport_ECR_REPO_ID_DEV }}:${{ github.sha }} GovSupportSupervisorGoogleCloudProject=${{ secrets.GovSupport_SUPERVISOR_GOOGLE_CLOUD_PROJECT_DEV }} GovSupportGoogleCloudProject=${{ secrets.GovSupport_GOOGLE_CLOUD_PROJECT_DEV }} LLM=${{ vars.LLM }} DomainName=${{ secrets.CERT_DOMAIN }} MicrosoftAppIdSecretArn=${{ secrets.MICROSOFT_APP_ID_SECRET_ARN }} MicrosoftAppPasswordSecretArn=${{ secrets.MICROSOFT_APP_PASSWORD_SECRET_ARN }}
+          aws cloudformation deploy --template-file infra/opensearch.yaml --stack-name "GovSupport-opensearch-dev" --region eu-west-3 --capabilities CAPABILITY_NAMED_IAM --parameter-overrides StageName=dev GovSupportRoleArn=${{ secrets.GovSupport_ROLE_ARN_DEV }}

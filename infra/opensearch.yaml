@@ -1,0 +1,50 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  GovSupport Opensearch - AWS Cloudformation Template
+
+Parameters:
+  StageName:
+    Type: String
+    Description: Name of the stage (e.g., dev, prod)
+    AllowedValues:
+      - dev
+      - prod
+  GovSupportRoleArn:
+    Type: String
+    Description: ARN for GovSupportRole
+
+Resources:
+  GovSupportOpensearch:
+    Type: AWS::OpenSearchServerless::Collection
+    Properties:
+      Name: !Sub GovSupport-${StageName}
+      Type: VECTORSEARCH
+      Description: GovSupport Opensearch Collection
+    DependsOn: GovSupportEncryptionPolicy
+
+  GovSupportDataAccessPolicy:
+    Type: AWS::OpenSearchServerless::AccessPolicy
+    Properties:
+      Name: !Sub GovSupport-aoss-access-${StageName}
+      Type: data
+      Description: Access policy for GovSupport opensearch collection
+      Policy: !Sub >-
+        [{"Description":"Access for GovSupport","Rules":[{"ResourceType":"index","Resource":["index/*/*"],"Permission":["aoss:*"]},{"ResourceType":"collection","Resource":["collection/GovSupport-${StageName}"],"Permission":["aoss:*"]}],"Principal":["${GovSupportRoleArn}"]}]
+
+  GovSupportNetworkPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: !Sub GovSupport-aoss-network-${StageName}
+      Type: network
+      Description: Network policy for GovSupport opensearch collection
+      Policy: !Sub >-
+        [{"Rules":[{"ResourceType":"collection","Resource":["collection/GovSupport-${StageName}"]},{"ResourceType":"dashboard","Resource":["collection/GovSupport-${StageName}"]}],"AllowFromPublic":true}]
+
+  GovSupportEncryptionPolicy:
+    Type: 'AWS::OpenSearchServerless::SecurityPolicy'
+    Properties:
+      Name: !Sub GovSupport-aoss-security-${StageName}
+      Type: encryption
+      Description: Encryption policy for GovSupport opensearch collection
+      Policy: !Sub >-
+        {"Rules":[{"ResourceType":"collection","Resource": ["collection/GovSupport-${StageName}"]}],"AWSOwnedKey":true}

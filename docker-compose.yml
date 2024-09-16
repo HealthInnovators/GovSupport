@@ -1,0 +1,35 @@
+services:
+ GovSupport:
+   build:
+     context: .
+     dockerfile: ./GovSupport_chatbot/Dockerfile
+   container_name: GovSupport_chatbot
+   ports:
+    - "80:80"
+   volumes:
+    - type: bind
+      source: ./pyproject.toml
+      target: /GovSupport_chatbot/pyproject.toml
+    - type: bind
+      source: ./GovSupport_chatbot/src
+      target: /GovSupport_chatbot
+    - ~/.aws/:/root/.aws:ro
+   networks:
+    - GovSupport
+   env_file:
+    - .env
+
+ dynamodb-local:
+   command: "-jar DynamoDBLocal.jar -sharedDb -inMemory"
+   image: "amazon/dynamodb-local:latest"
+   container_name: dynamodb-local
+   ports:
+     - "8000:8000"
+   volumes:
+     - "./docker/dynamodb:/home/dynamodblocal/data"
+   working_dir: /home/dynamodblocal
+   networks:
+     - GovSupport
+
+networks:
+  GovSupport:

@@ -1,0 +1,305 @@
+from fastapi import FastAPI, Depends, Request, status
+from fastapi.responses import JSONResponse, Response
+
+from GovSupport_core import components as GovSupport
+from GovSupport_core.services import enrolment
+from GovSupport_core.utils.monitoring import logger
+
+from integrations.google_chat.structures import GoogleChat
+from integrations.google_chat.verification import (
+    verify_google_chat_request,
+    verify_google_chat_supervision_request,
+)
+
+from integrations.microsoft_teams.structures import MicrosoftTeams
+
+from threading import Thread
+
+app = FastAPI(docs_url=None)
+
+
+@app.get("/health")
+def health():
+    return JSONResponse(status_code=status.HTTP_200_OK, content={"status": "Online"})
+
+
+@app.post("/google-chat/chat")
+def google_chat_endpoint(event=Depends(verify_google_chat_request)) -> dict:
+    """
+    Handles inbound requests from Google Chat for GovSupport
+    """
+    logger.info("New Google Chat Request")
+    google_chat = GoogleChat()
+    user = event["user"]["email"]
+    domain = user.split("@")[1]
+
+    domain_enrolled, office = enrolment.check_domain_status(domain)
+    if domain_enrolled is not True:
+        logger.info("Domain not enrolled")
+        return google_chat.responses.DOMAIN_NOT_ENROLLED
+    logger.info("Domain is enrolled")
+
+    user_enrolled, user_record = enrolment.check_user_status(user)
+    if user_enrolled is not True:
+        logger.info("User is not enrolled")
+        return google_chat.responses.USER_NOT_ENROLLED
+    logger.info("User is enrolled")
+
+    included_in_rct = enrolment.check_rct_status(office)
+    if included_in_rct is True:
+        user_has_existing_call = enrolment.check_user_call_status(user_record)
+        if user_has_existing_call is True and event["type"] == "MESSAGE":
+            GovSupport.rct_survey_reminder(event, user_record, chat_client=google_chat)
+            return google_chat.responses.NO_CONTENT
+
+    match event["type"]:
+        case "ADDED_TO_SPACE":
+            match event["space"]["type"]:
+                case "DM":
+                    return google_chat.responses.INTRODUCE_GovSupport_IN_DM
+                case "ROOM":
+                    return google_chat.responses.introduce_GovSupport_in_space(
+                        space_name=event["space"]["displayName"]
+                    )
+        case "MESSAGE":
+            GovSupport_message = google_chat.format_message(event)
+            if GovSupport_message == "PII Detected":
+                return google_chat.responses.NO_CONTENT
+            process_message_thread = Thread(
+                target=GovSupport.handle_message,
+                kwargs={"GovSupport_message": GovSupport_message, "chat_client": google_chat},
+            )
+            process_message_thread.start()
+            return google_chat.responses.ACCEPTED
+        case "CARD_CLICKED":
+            match event["action"]["actionMethodName"]:
+                case "Proceed":
+                    GovSupport_message = google_chat.handle_proceed_query(event)
+                    process_message_thread = Thread(
+                        target=GovSupport.handle_message,
+                        kwargs={
+                            "GovSupport_message": GovSupport_message,
+                            "chat_client": google_chat,
+                        },
+                    )
+                    process_message_thread.start()
+                    return google_chat.responses.NO_CONTENT
+                case "handle_control_group_forward":
+                    GovSupport_message = google_chat.handle_control_group_query(event)
+                    control_group_card = {"cardsV2": event["message"]["cardsV2"]}
+                    control_group_card["cardsV2"][0]["card"]["sections"][0][
+                        "widgets"
+                    ].pop()
+                    control_group_card["cardsV2"][0]["card"]["sections"][0][
+                        "widgets"
+                    ].append(
+                        {
+                            "textParagraph": {
+                                "text": '<font color="#005743"><b>Request forwarded to supervisor<b></font>'
+                            }
+                        }
+                    )
+                    supervisor_space = enrolment.get_designated_supervisor_space(
+                        GovSupport_message.user
+                    )
+                    google_chat.send_message_to_supervisor_space(
+                        space_id=supervisor_space,
+                        message=google_chat.responses.message_control_forward(
+                            GovSupport_message.user, GovSupport_message.message_string
+                        ),
+                    )
+                    control_group_card = google_chat.append_survey_questions(
+                        control_group_card, GovSupport_message.thread_id, GovSupport_message.user
+                    )
+                    google_chat.update_message_in_adviser_space(
+                        message_type="cardsV2",
+                        space_id=GovSupport_message.space_id,
+                        message_id=GovSupport_message.message_id,
+                        message=control_group_card,
+                    )
+                    return google_chat.responses.NO_CONTENT
+                case "control_group_survey":
+                    GovSupport_message = google_chat.handle_control_group_query(event)
+                    control_group_card = {"cardsV2": event["message"]["cardsV2"]}
+                    control_group_card["cardsV2"][0]["card"]["sections"][0][
+                        "widgets"
+                    ].pop()
+                    control_group_card = google_chat.append_survey_questions(
+                        control_group_card, GovSupport_message.thread_id, GovSupport_message.user
+                    )
+                    google_chat.update_message_in_adviser_space(
+                        message_type="cardsV2",
+                        space_id=GovSupport_message.space_id,
+                        message_id=GovSupport_message.message_id,
+                        message=control_group_card,
+                    )
+                    return google_chat.responses.NO_CONTENT
+                case "edit_query_dialog":
+                    return google_chat.get_edit_query_dialog(event)
+                case "receiveEditedQuery":
+                    GovSupport_message = google_chat.handle_edited_query(event)
+                    process_message_thread = Thread(
+                        target=GovSupport.handle_message,
+                        kwargs={
+                            "GovSupport_message": GovSupport_message,
+                            "chat_client": google_chat,
+                        },
+                    )
+                    process_message_thread.start()
+                    return google_chat.responses.SUCCESS_DIALOG
+                case "continue_existing_interaction":
+                    google_chat.continue_existing_interaction(event)
+                    GovSupport_message = google_chat.handle_proceed_query(event)
+                    process_message_thread = Thread(
+                        target=GovSupport.handle_message,
+                        kwargs={
+                            "GovSupport_message": GovSupport_message,
+                            "chat_client": google_chat,
+                        },
+                    )
+                    process_message_thread.start()
+                    return google_chat.responses.NO_CONTENT
+                case "end_existing_interaction":
+                    google_chat.end_existing_interaction(event)
+                    return google_chat.responses.NO_CONTENT
+                case "survey_response":
+                    message_event = google_chat.handle_survey_response(event)
+                    if message_event:
+                        event["message"]["text"] = message_event
+                        GovSupport_message = google_chat.format_message(event)
+                        process_message_thread = Thread(
+                            target=GovSupport.handle_message,
+                            kwargs={
+                                "GovSupport_message": GovSupport_message,
+                                "chat_client": google_chat,
+                            },
+                        )
+                        process_message_thread.start()
+                    return google_chat.responses.ACCEPTED
+                case "call_complete":
+                    google_chat.finalise_GovSupport_call(event)
+                    return google_chat.responses.ACCEPTED
+        case _:
+            return Response(status_code=status.HTTP_404_NOT_FOUND)
+
+
+@app.post("/google-chat/supervision")
+def google_chat_supervision_endpoint(
+    event=Depends(verify_google_chat_supervision_request),
+):
+    """
+    Handles inbound requests from Google Chat for GovSupport Supervisor
+    """
+    google_chat = GoogleChat()
+    user = event["user"]["email"]
+    domain = user.split("@")[1]
+
+    domain_enrolled, _ = enrolment.check_domain_status(domain)
+    if domain_enrolled is not True:
+        return google_chat.responses.DOMAIN_NOT_ENROLLED
+
+    user_enrolled, user_record = enrolment.check_user_status(user)
+    if user_enrolled is not True:
+        return google_chat.responses.USER_NOT_ENROLLED
+
+    user_supervisor = enrolment.check_user_role(user_record)
+    if user_supervisor is not True:
+        return google_chat.responses.USER_NOT_SUPERVISOR
+
+    match event["type"]:
+        case "ADDED_TO_SPACE":
+            match event["space"]["type"]:
+                case "DM":
+                    return google_chat.responses.INTRODUCE_GovSupport_SUPERVISOR_IN_DM
+                case "ROOM":
+                    return google_chat.responses.introduce_GovSupport_supervisor_in_space(
+                        space_name=event["space"]["displayName"]
+                    )
+        case "CARD_CLICKED":
+            match event["action"]["actionMethodName"]:
+                case "Approved":
+                    google_chat.handle_supervisor_approval(event)
+                    return google_chat.responses.NO_CONTENT
+                case "Rejected":
+                    google_chat.handle_supervisor_rejection(event)
+                    return google_chat.responses.NO_CONTENT
+                case "receiveDialog":
+                    match event["message"]["annotations"][0]["slashCommand"][
+                        "commandName"
+                    ]:
+                        case "/addUser":
+                            google_chat.add_user(event)
+                            return google_chat.responses.SUCCESS_DIALOG
+                        case "/removeUser":
+                            google_chat.remove_user(event)
+                            return google_chat.responses.SUCCESS_DIALOG
+        case "MESSAGE":
+            match event["dialogEventType"]:
+                case "REQUEST_DIALOG":
+                    match event["message"]["annotations"][0]["slashCommand"][
+                        "commandName"
+                    ]:
+                        case "/addUser":
+                            return google_chat.responses.ADD_USER_DIALOG
+                        case "/removeUser":
+                            return google_chat.responses.REMOVE_USER_DIALOG
+                        case "/help":
+                            return google_chat.responses.HELPER_DIALOG
+                        case "/listUsers":
+                            return JSONResponse(
+                                content=google_chat.list_space_users(event)
+                            )
+        case _:
+            return Response(status_code=status.HTTP_404_NOT_FOUND)
+
+
+@app.post("/microsoft-teams/chat")
+async def microsoft_teams_endpoint(request: Request):
+    event = await request.json()
+    print("POST request received", event)
+    microsoft_teams = MicrosoftTeams()
+
+    match event["type"]:
+        case "message":
+            GovSupport_message = microsoft_teams.format_message(event)
+            GovSupport.temporary_teams_invoke(microsoft_teams, GovSupport_message)
+        case "invoke":
+            match event["value"]["action"]["verb"]:
+                case "proceed":
+                    # TODO Handle Proceed Route
+                    print("Adviser choice was to proceed")
+                    microsoft_teams.update_card(event)
+                    return microsoft_teams.responses.OK
+                case "redacted_query":
+                    # TODO Handle edit original query
+                    print("Adviser choice was to edit original query")
+                    redacted_card = microsoft_teams.messages.create_redacted_card(event)
+                    microsoft_teams.update_card(event, card=redacted_card)
+                    return microsoft_teams.responses.OK
+                case "approved":
+                    microsoft_teams.handle_thumbs_up(event)
+                    return microsoft_teams.responses.OK
+                case "rejected":
+                    microsoft_teams.handle_thumbs_down(event)
+                    return microsoft_teams.responses.OK
+
+
+@app.post("/microsoft-teams/supervision")
+async def microsoft_teams_supervision_endpoint(request: Request):
+    return JSONResponse(
+        status_code=status.HTTP_200_OK, content={"text": "Request received"}
+    )
+
+
+@app.post("/GovSupport/chat")
+def GovSupport_endpoint(request: Request):
+    return JSONResponse(
+        status_code=status.HTTP_200_OK, content={"text": "Request received"}
+    )
+
+
+@app.post("/GovSupport/supervision")
+def GovSupport_supervision_endpoint(request: Request):
+    return JSONResponse(
+        status_code=status.HTTP_200_OK, content={"text": "Request received"}
+    )
